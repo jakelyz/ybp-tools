@@ -1,0 +1,15 @@
+---
+:Name: example
+:Version: 1.0.1
+:Source: https://someexamplesite.com/example/releases/download/example-1.0.1.tar.gz
+:Homepage: https://someexamplesite.com
+:Details: Some example details
+:MD5: bfsayf8372b273723hdh238d3dh892h3d
+
+:PRE_BUILD_STEPS:
+        - patch -p1 < ../some-example-patch-1.0.1.patch
+
+:BUILD_STEPS:
+        - ./configure --without-pam
+        - make
+        - make install

@@ -1,0 +1,309 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'digest'
+require 'rubygems/package'
+require 'open-uri'
+
+CONF_YAML = ENV['HOME']+"/.ybp.yaml"
+
+def arch
+  return RUBY_PLATFORM
+end
+
+def load_yaml _file
+  # Loads a YAML for parsing
+  YAML.load_file(_file)
+end
+
+def md5_check _hash, _file
+  unless Digest::MD5.file(_file).hexdigest == _hash
+    puts ybpmk_out "Error", "MD5 verification failed for #{_file}!"
+    puts ybpmk_out "Error", "Expected: #{_hash}"
+    puts ybpmk_out "Error", "Actual: #{Digest::MD5.file(_file).hexdigest}"
+    exit 20
+  end
+  puts ybpmk_out "Info", "MD5 verification succeeded!"
+end
+
+def sha256_check _hash, _file
+  unless Digest::SHA256.file(_file).hexdigest == _hash
+    puts ybpmk_out "Error", "SHA256 verification failed for #{_file}!"
+    puts ybpmk_out "Error", "Expected: #{_hash}"
+    puts ybpmk_out "Error", "Actual: #{Digest::SHA256.file(_file).hexdigest}"
+    exit 20
+  end
+  puts ybpmk_out "Info", "SHA256 verification succeeded!"
+end
+
+def extension_eval _pkg, _buildroot
+  if _pkg.end_with? ".zip"
+    shunzip _pkg, _pkg.chomp(".zip")
+  elsif _pkg.end_with? ".git"
+    puts ybpmk_out "Error", "Sorry, git source handling not yet implemented!"
+    exit 99
+  else
+    # Dangerous assumption that its a .tar, or compressed tar
+    decompress_dst = "#{_buildroot}/.decompress"
+    decompress _pkg, decompress_dst
+    extract decompress_dst
+  end
+end
+
+def ybpmk_out status, msg
+  _info = "\e[34m"
+  _error = "\e[32m"
+  _reset = "\e[0m"
+  _format = "[ybpmk] .:| #{status} - #{msg}"
+  case status
+  when "Info"
+    _out = _format.insert(0, _info)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  when "Error"
+    _out = _format.insert(0, _error)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  end
+end
+
+def calculate_duration secs
+  result = ""
+  days = secs / 86400
+  hours = (secs - days * 86400) / 3600
+  minutes = (secs - days * 86400 - hours * 3600) / 60
+  seconds = secs - days * 86400 - hours * 3600 - minutes * 60
+  result << "#{days}d " if days > 0
+  result << "#{hours}h " if hours > 0
+  result << "#{minutes}m " if minutes > 0
+  result << "#{seconds}s " if seconds > 0
+  return result.rstrip
+end
+
+def find_src buildroot, name
+  Dir["#{buildroot}/#{name}*"].each do |found|
+    if File.directory? found
+      return found
+    end
+  end
+end
+
+def httpfetch source, dest
+  begin
+    URI.open(source) { |_src| writefile dest, _src }
+  rescue StandardError => e
+    puts ybpmk_out "Error", "Encountered error fetching source: #{e}"
+    exit 5
+  else
+    puts ybpmk_out "Info", "Successfully retrieved #{source}"
+  end
+end
+
+def writefile dest, data
+  File.open(dest, "wb") { |_dest| _dest.write(data.read) }
+end
+
+def system_cmd command
+  out = IO.popen(*command, [:in, :err]=>:out) do |io|
+    io.sync = true
+    while out = io.gets
+      puts out
+    end
+  end
+  unless $?.success?
+    puts ybpmk_out "Error", "Didn't return success code executing #{command}"
+    exit 12
+  end
+end
+
+def compress dest
+  # Call shell helper script to assist with creating .txz
+  system_cmd "ybp-helper -c #{dest}"
+end
+
+def decompress source, dest
+  # Call shell helper script to assist with decompression
+  system_cmd "ybp-helper -t #{source} -d #{dest}"
+end
+
+def extract source
+  # Call shell helper script to assist with extraction
+  system_cmd "ybp-helper -e #{source}"
+end
+
+def shunzip source, dest
+  # Call shell helper script to unzip source
+  system_cmd "ybp-helper -u #{source} -d #{dest}"
+end
+
+def valid_ybp_conf ybp_yaml
+  # Validate ybp conf yaml
+  required = [:Pkgdb, :Buildroot, :Fakeroot, :Stagingdir]
+  return required.all?(&ybp_yaml.method(:key?))
+end
+
+def valid_pkg_conf pkg_yaml
+  # Validate pkg conf yaml
+  required = [:Name, :Version, :Source, :Homepage, :Details, :BUILD_STEPS]
+  return required.all?(&pkg_yaml.method(:key?))
+end
+
+def _initialize fakeroot, buildroot
+  # Initializes all directories required
+  #
+  # Remove Buildroot and Fakeroot if it currently exists, and remake them
+  puts ybpmk_out "Info", "Initializing directory paths"
+  targets = [fakeroot, buildroot]
+  targets.each do |target|
+    FileUtils.remove_entry_secure target if File.directory? target
+    FileUtils.mkdir_p target
+  end
+end
+
+def main
+  ybp_conf = load_yaml(CONF_YAML)
+  pkg_conf = load_yaml(ARGV[0])
+  pkg_yaml_path = File.dirname(ARGV[0])
+
+  # Sanity check on $HOME/.ybp.yaml
+  unless valid_ybp_conf ybp_conf
+    puts ybpmk_out "Error", "#{CONF_YAML} doesn't appear to be valid."
+    exit 3
+  end
+
+  # Sanity check on the given pkg.yaml
+  unless valid_pkg_conf pkg_conf
+    puts ybpmk_out "Error", "#{ARGV[0]} doesn't appear to be valid."
+    exit 16
+  end
+
+  _initialize ybp_conf[:Fakeroot], ybp_conf[:Buildroot]
+
+  # Pull the source down to the Buildroot directory
+  case pkg_conf[:Source].split(':')[0]
+    when "https", "http"
+      dest = File.join(ybp_conf[:Buildroot], pkg_conf[:Source].split('/')[-1].downcase)
+      httpfetch pkg_conf[:Source], dest
+      # Check MD5 or SHA256 of download, if hash is provided
+      if pkg_conf.key? :MD5
+        md5_check pkg_conf[:MD5], dest
+      elsif pkg_conf.key? :SHA256
+        sha256_check pkg_conf[:SHA256], dest
+      end
+      # Evaluate what sort of extension we are dealing with, and handle it
+      Dir.chdir ybp_conf[:Buildroot] do
+        extension_eval dest, ybp_conf[:Buildroot]
+      end
+  end
+
+  extracted_source = find_src ybp_conf[:Buildroot], pkg_conf[:Name]
+
+  # Sanity check to ensure the source is there
+  unless File.directory? extracted_source
+    puts ybpmk_out "Error", "Sanity check failed on assumed source directory: #{extracted_source}"
+    exit 7
+  end
+
+  # Check if there is a patch directory present, and move patches to buildroot if so
+  if File.directory? "#{pkg_yaml_path}/PATCHES"
+    Dir.glob("#{pkg_yaml_path}/PATCHES/*").each do |patch|
+      FileUtils.cp patch, ybp_conf[:Buildroot]
+    end 
+  end
+
+  # Mark start time to calculate build duration
+  build_start = Time.now
+
+  # cd to source, and run build steps, installing in Fakeroot
+
+  Dir.chdir extracted_source do
+    if pkg_conf.key? :PATCH_STEPS
+      puts ybpmk_out "Info", "Applying patches"
+      pkg_conf[:PATCH_STEPS].each do |_patch|
+        system_cmd "#{_patch}"
+      end
+    end
+    if pkg_conf.key? :PRE_BUILD_STEPS
+      puts ybpmk_out "Info", "Running pre build steps"
+      pkg_conf[:PRE_BUILD_STEPS].each do |_pre|
+        system_cmd "#{_pre}"
+      end
+    end
+    puts ybpmk_out "Info", "Building #{pkg_conf[:Name]}.."
+    pkg_conf[:BUILD_STEPS].each do |step|
+      if step.include? "$FAKEROOT"
+        system_cmd step.sub("$FAKEROOT", ybp_conf[:Fakeroot])
+      elsif step.include? "install" and not step.include? "$FAKEROOT"
+        # Warning: Weak attempt to force install to fakeroot,
+        #  if instructions not declared during build steps
+        if step.include? "python"
+          system_cmd "#{step} --root=#{ybp_conf[:Fakeroot]}"
+        else
+          system_cmd "DESTDIR=#{ybp_conf[:Fakeroot]} #{step}"
+        end
+      else
+        system_cmd "#{step}"
+      end
+    end
+  end
+
+  # Mark end time to calculate build duration
+  build_end = Time.now
+  build_diff = (build_end - build_start).to_i
+  build_duration = calculate_duration build_diff
+  build_date = Time.now.strftime("%m/%d/%Y %H:%M")
+
+  # Go ahead and create package db entry in fakeroot, so its there during installation extractions
+  _dbentry = "#{ybp_conf[:Pkgdb]}/#{pkg_conf[:Name]}-#{pkg_conf[:Version]}"
+  FileUtils.mkdir_p "#{ybp_conf[:Fakeroot]}/#{_dbentry}"
+
+  # Determine file list, and check for symlinks
+  tracked_files = []
+  tracked_symlinks = {}
+
+  # First pass to determine symlinks, and unlink them
+  Dir.glob("#{ybp_conf[:Fakeroot]}/**/*").each do |_file|
+    if File.symlink? _file
+      tracked_symlinks[_file[Regexp.new(/(?<=#{ybp_conf[:Fakeroot]}).*/)]] = File.readlink _file
+      File.unlink _file
+    end
+  end
+
+  # Second pass to determine actual files
+  Dir.glob("#{ybp_conf[:Fakeroot]}/**/*").each do |_file|
+    _file =_file[Regexp.new(/(?<=#{ybp_conf[:Fakeroot]}).*/)]
+    unless File.exist? _file
+      tracked_files.append _file
+    end
+  end
+
+  # Create build yaml data
+  install_data = pkg_conf
+  install_data[:BUILD_DATE] = build_date
+  install_data[:BUILD_DURATION] = build_duration
+  install_data[:TRACKED_FILES] = tracked_files
+  unless tracked_symlinks.empty?
+    install_data[:TRACKED_SYMLINKS] = tracked_symlinks
+  end
+
+  # Write install entry
+  _installentry = "#{_dbentry}/install.yaml"
+  File.open("#{ybp_conf[:Fakeroot]}/#{_installentry}", "w") { |_inst| _inst.write install_data.to_yaml }
+
+  # Declare binary name
+  bin_name = "#{ybp_conf[:Stagingdir]}/#{pkg_conf[:Name]}-#{pkg_conf[:Version]}-#{arch}-ybp.txz"
+
+  # Ensure staging directory exists before attempting
+  FileUtils.mkdir_p ybp_conf[:Stagingdir] unless File.exist? ybp_conf[:Stagingdir]
+
+  # cd to fakeroot and compress
+  Dir.chdir ybp_conf[:Fakeroot] do
+    compress bin_name
+  end
+
+  puts ybpmk_out "Info", "Successfully created #{bin_name}!"
+
+
+end
+
+main

@@ -1,0 +1,5 @@
+---
+:Pkgdb: "/var/ybp/db"
+:Stagingdir: "/var/ybp/staging"
+:Buildroot: "/run/ybp/buildroot"
+:Fakeroot: "/run/ybp/fakeroot"

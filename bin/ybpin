@@ -1,0 +1,131 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'rubygems/package'
+
+CONF_YAML = ENV['HOME']+"/.ybp.yaml"
+
+def load_yaml _file
+  # Loads a YAML for parsing
+  YAML.load_file(_file)
+end
+
+def ybpin_out status, msg
+  _info = "\e[34m"
+  _error = "\e[32m"
+  _reset = "\e[0m"
+  _format = "[ybpin] .:| #{status} - #{msg}"
+  case status
+  when "Info"
+    _out = _format.insert(0, _info)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  when "Error"
+    _out = _format.insert(0, _error)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  end
+end
+
+def system_cmd command
+  out = IO.popen(*command, :err=>[:child, :out]) do |io|
+    io.read
+  end
+  unless $?.success?
+    puts ybpin_out "Error", "Didn't return success code executing #{command}"
+    puts "#{out}"
+    exit 12
+  end
+  return out
+end
+
+def path_rm _path
+  FileUtils.rm_f _path
+end
+
+def valid_ybp_pkg package
+  return (File.exist? package and package.include? "ybp" and package.end_with? ".txz")
+end
+
+def valid_ybp_conf ybp_yaml
+  # Validate ybp conf yaml
+  required = [:Pkgdb, :Buildroot, :Fakeroot, :Stagingdir]
+  return required.all?(&ybp_yaml.method(:key?))
+end
+
+def _initialize db
+  # Ensure required directories exist, namely the db path
+  puts ybpin_out "Info", "Checking for valid Pkgdb path"
+  FileUtils.mkdir_p db unless File.directory? db
+end
+
+def main
+  ybp_conf = load_yaml(CONF_YAML)
+  pkgbin = ARGV[0]
+  _root = "/"
+
+  # Sanity check on $HOME/.ybp.yaml
+  unless valid_ybp_conf ybp_conf
+    puts ybpin_out "Error" "#{CONF_YAML} doesn't appear to be valid."
+    exit 3
+  end
+
+  # Sanity check to ensure we have a db path
+  _initialize ybp_conf[:Pkgdb]
+
+  # Sanity check to ensure we were given a ybp pkg
+  puts ybpin_out "Info", "Running sanity check on #{pkgbin}"
+  unless valid_ybp_pkg pkgbin
+    puts ybpin_out "Error", "#{pkgbin} doesn't appear to be a valid ybp package."
+    exit 17
+  end
+
+  # Evalute incoming file list
+  puts ybpin_out "Info", "Evaluating file list"
+  incoming_files = system_cmd "tar tf #{pkgbin}"
+  incoming_files = incoming_files.split("\n")
+
+  # Declare path to install.yaml
+  pkgbin_inst_yaml = incoming_files.select { |_file| _file.end_with? "install.yaml" }
+
+  incoming_files.each do |_file|
+    true_file = _file.sub!(/^./, '')
+    # If there is an existing symlink matching an incoming file, unlink it
+    if File.symlink? true_file
+      File.unlink true_file
+    # If there is a matching stale file (previous installs, failed installs, failed removals) remove it
+    elsif File.exist? true_file
+      path_rm true_file
+    end
+  end
+
+  # Actually extract the pkgbin now
+  puts ybpin_out "Info", "Installing #{pkgbin}"
+  Dir.chdir _root do
+    system_cmd "tar xpf #{pkgbin}"
+  end
+
+  # Run ldconfig to make sure new libraries are available
+  system_cmd "/sbin/ldconfig"
+
+  # Read the install.yaml to determine if any symlinks should be set
+  pkg_conf = load_yaml(pkgbin_inst_yaml[0]) 
+  if pkg_conf.key? :TRACKED_SYMLINKS
+    pkg_conf[:TRACKED_SYMLINKS].each do |target, source|
+      File.symlink source, target unless File.symlink? target
+    end  
+  end
+
+  # Check if there are any post install steps to be run
+  if pkg_conf.key? :POST_INSTALL_STEPS
+    puts ybpin_out "Info", "Running Post Install Steps"
+    pkg_conf[:POST_INSTALL_STEPS].each do |step|
+      system_cmd step
+    end
+  end
+
+  puts ybpin_out "Info", "Successfully installed #{pkgbin}!"
+
+end
+
+main

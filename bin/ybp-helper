@@ -1,0 +1,51 @@
+#!/bin/sh
+
+compress() {
+	tar cvf - . | xz -c > $1
+}
+
+shunzip() {
+  unzip $1 -d $2
+}
+
+decompress() {
+	case ${1##*.} in
+		bz2) 
+		  bzip2 -dc > "$2" ;;
+		tar)  
+		  cat       > "$2" ;;
+		tgz | gz) 
+		  gzip -dc  > "$2" ;;
+		txz | xz)
+		  xz -dc    > "$2" ;;
+	esac < "$1"
+}
+
+extract() {
+	tar xf "$1"
+}
+
+while getopts "t:d:e:c:u:" opt; do
+	case "${opt}" in
+		t)	t=${OPTARG} ;;
+		d)	d=${OPTARG} ;;
+		e)	e=${OPTARG} ;;
+		c)	c=${OPTARG} ;;
+		u)	u=${OPTARG} ;;
+	esac
+done
+
+if [ -n "$t" ] && [ -n "$d" ]; then
+  decompress "${t}" "${d}"
+
+elif [ -n "$e" ]; then
+  extract "${e}"
+
+elif [ -n "$c" ]; then
+  compress "${c}"
+
+elif [ -n "$u" ] && [ -n "$d" ]; then
+  shunzip "${u}" "${d}"
+
+fi
+

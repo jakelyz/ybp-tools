@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'find'
+require 'rubygems/package'
+
+CONF_YAML = ENV['HOME']+"/.ybp.yaml"
+
+def load_yaml _file
+  # Loads a YAML for parsing
+  begin
+    YAML.load_file(_file)
+  rescue StandardError => e
+    puts ybprm_out "Error", "Encoutered error attempting to load yaml #{_file}"
+    puts ybprm_out "Error", "Error message: #{e}"
+    exit 6
+  end
+end
+
+def ybprm_out status, msg
+  _info = "\e[34m"
+  _error = "\e[32m"
+  _reset = "\e[0m"
+  _format = "[ybprm] .:| #{status} - #{msg}"
+  case status
+  when "Info"
+    _out = _format.insert(0, _info)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  when "Error"
+    _out = _format.insert(0, _error)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  when "Warning"
+    _out = _format.insert(0, _error)
+    _out = _out.insert(_out.length, _reset)
+    return _out
+  end
+end
+
+def path_rm _path
+  begin
+    FileUtils.remove_entry_secure _path
+  rescue Errno::ENOENT
+    puts ybprm_out "Warning", "Tracked file not found #{_path}"
+    return
+  end
+end
+
+def find_pkg_yaml ybp_conf, pkg
+  puts ybprm_out "Info", "Locating install yaml for #{pkg}"
+  Find.find(ybp_conf[:Pkgdb]) do |_path|
+    if _path =~ /#{pkg}.*\/install.yaml/
+      return _path
+    end
+  end
+end
+
+def valid_ybp_conf ybp_yaml
+  # Validate ybp conf yaml
+  required = [:Pkgdb, :Buildroot, :Fakeroot, :Stagingdir]
+  return required.all?(&ybp_yaml.method(:key?))
+end
+
+def main
+  ybp_conf = load_yaml(CONF_YAML)
+  pkg = ARGV[0]
+
+  # Sanity check on $HOME/.ybp.yaml
+  unless valid_ybp_conf ybp_conf
+    puts ybprm_out "Error", "#{CONF_YAML} doesn't appear to be valid."
+    exit 3
+  end
+
+  # Find install yaml for selected package
+  pkg_install_yaml = find_pkg_yaml ybp_conf, pkg
+
+  # Sanity check to make sure we found a match
+  unless defined?(pkg_install_yaml) && !pkg_install_yaml.nil?
+    puts ybprm_out "Error", "Did not find install.yaml for #{pkg}! Is this installed?"
+    exit 8
+  end
+
+  # Load install yaml to iterate keys
+  pkg_yaml = load_yaml pkg_install_yaml
+
+  # Evaluate if there are symlinks to be handled
+  if pkg_yaml.key? :TRACKED_SYMLINKS
+    pkg_yaml[:TRACKED_SYMLINKS].each do |target, source|
+      puts ybprm_out "Info", "Unlinking symlink #{source}"
+      begin
+        File.unlink source
+      rescue Errno::ENOENT
+        puts ybprm_out "Warning", "Tracked symlink no longer exists #{source}"
+        next
+      end
+    end
+  end
+
+  # Remove tracked files, starting with actual files first
+  puts ybprm_out "Info", "Evaluating file list"
+  tracked_files = pkg_yaml[:TRACKED_FILES].sort_by { |_path| File.file?(_path) ? 0 : 1 }
+  tracked_files.each do |_file|
+    puts ybprm_out "Info", "Removing #{_file}"
+    path_rm _file 
+    # Sanity check to ensure we actually removed everything that was tracked
+    if File.exist? _file
+      puts ybprm_out "Error", "#{_file} was supposed to be removed, but still remains."
+      exit 12
+    end
+  end
+
+  puts ybprm_out "Info", "Successfully removed #{pkg}!"
+
+
+end
+
+main
